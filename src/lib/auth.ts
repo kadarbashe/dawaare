@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { Resend } from "resend";
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -17,6 +18,9 @@ export const auth = betterAuth({
       role: {
         type: "string",
         default: "SELLER",
+        // Never settable through sign-up or update-user. Without this, anyone
+        // could send role: "ADMIN" and promote themselves.
+        input: false,
       },
       number: {
         type: "string",
@@ -31,6 +35,19 @@ export const auth = betterAuth({
         default: "",
       },
     },
+  },
+  hooks: {
+    // Staff accounts are created by an admin (settings) or the local setup
+    // route, both of which call auth.api directly. Requests that arrive over
+    // HTTP carry ctx.request, so this closes the public sign-up endpoint
+    // without breaking those server-side calls.
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path === "/sign-up/email" && ctx.request) {
+        throw new APIError("FORBIDDEN", {
+          message: "Sign-up is disabled. Ask an admin to create your account.",
+        });
+      }
+    }),
   },
   emailAndPassword: {
     enabled: true,

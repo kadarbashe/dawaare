@@ -41,7 +41,8 @@ export async function addSellerAction(
         password,
         name,
         image: "",
-        role: "SELLER",
+        // role is left out: auth.ts stops it being set here, and every new
+        // account defaults to SELLER.
         number: phone,
         image_id: "",
       },

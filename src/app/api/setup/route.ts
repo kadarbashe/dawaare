@@ -1,4 +1,5 @@
 import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 
 // One-time local bootstrap route for creating the first admin account.
@@ -42,12 +43,17 @@ export async function GET(request: NextRequest) {
         email,
         password,
         name,
-        role: "ADMIN",
         number: "",
         image: "",
         image_id: "",
       },
       headers: request.headers,
+    });
+
+    // role can't be set through sign-up (see auth.ts), so promote it here.
+    await prisma.user.update({
+      where: { email: email.toLowerCase() },
+      data: { role: "ADMIN" },
     });
 
     return NextResponse.json({
