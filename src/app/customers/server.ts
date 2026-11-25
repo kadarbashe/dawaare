@@ -3,6 +3,12 @@
 import { prisma } from "@/lib/db";
 import { revalidatePath } from "next/cache";
 import { requireSession, AuthError } from "@/lib/auth-guard";
+import {
+  is_payment_method,
+  round_money,
+  RuleError,
+  status_after_repayment,
+} from "@/lib/sale-rules";
 
 interface ActionResult {
   success: boolean;
@@ -78,50 +84,53 @@ export async function repayDebt(
     return { success: false, error: "Missing required fields." };
   }
 
-  const paymentAmount = parseFloat(paymentAmountStr);
+  const paymentAmount = round_money(Number(paymentAmountStr));
 
-  if (isNaN(paymentAmount) || paymentAmount <= 0) {
+  if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
     return { success: false, error: "Invalid payment amount." };
   }
 
-  if (!["ZAAD", "E_DAHAB", "CASH"].includes(paymentMethod)) {
+  if (!is_payment_method(paymentMethod)) {
     return { success: false, error: "Invalid payment method." };
   }
 
   try {
     await requireSession();
 
-    const sale = await prisma.sale.findUnique({
-      where: { id: saleId },
-    });
-
-    if (!sale) {
-      return { success: false, error: "Sale not found." };
-    }
-
-    if (paymentAmount > sale.remaining) {
-      return {
-        success: false,
-        error: "Payment amount exceeds remaining debt.",
-      };
-    }
-
-    const newRemaining = Math.max(0, sale.remaining - paymentAmount);
-    const newAmountPaid = sale.amount_paid + paymentAmount;
-    const newStatus =
-      newRemaining === sale.total_amount
-        ? "unpaid"
-        : newRemaining > 0.01
-          ? "partial"
-          : "paid";
-
     await prisma.$transaction(async (tx) => {
+      // The balance check is part of the update, so two people recording a
+      // payment on the same debt at once can't both get through.
+      const { count } = await tx.sale.updateMany({
+        where: { id: saleId, remaining: { gte: paymentAmount - 0.005 } },
+        data: {
+          remaining: { decrement: paymentAmount },
+          amount_paid: { increment: paymentAmount },
+        },
+      });
+
+      if (count === 0) {
+        const exists = await tx.sale.findUnique({
+          where: { id: saleId },
+          select: { id: true },
+        });
+        throw new RuleError(
+          exists ? "Payment amount exceeds remaining debt." : "Sale not found.",
+        );
+      }
+
+      // Clean up float drift and set the status from the new balance.
+      const sale = await tx.sale.findUniqueOrThrow({
+        where: { id: saleId },
+        select: { remaining: true, amount_paid: true },
+      });
+      const remaining = Math.max(0, round_money(sale.remaining));
+
       await tx.sale.update({
         where: { id: saleId },
         data: {
-          amount_paid: newAmountPaid,
-          remaining: newRemaining,
-          status: newStatus,
+          remaining,
+          amount_paid: round_money(sale.amount_paid),
+          status: status_after_repayment(remaining),
         },
       });
 
@@ -129,7 +138,7 @@ export async function repayDebt(
         data: {
           sale_id: saleId,
           repaid_amount: paymentAmount,
-          payment_method: paymentMethod as "ZAAD" | "E_DAHAB" | "CASH",
+          payment_method: paymentMethod,
         },
       });
     });
@@ -138,7 +147,7 @@ export async function repayDebt(
 
     return { success: true };
   } catch (error) {
-    if (error instanceof AuthError) {
+    if (error instanceof AuthError || error instanceof RuleError) {
       return { success: false, error: error.message };
     }
     console.error("Failed to process payment:", error);

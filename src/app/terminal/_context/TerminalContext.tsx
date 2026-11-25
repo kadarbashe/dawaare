@@ -67,6 +67,8 @@ interface TerminalContextValue {
 
 const TerminalContext = createContext<TerminalContextValue | null>(null);
 
+const DEFAULT_PAYMENT_METHOD = "ZAAD";
+
 export function TerminalProvider({
   children,
   initialProducts,
@@ -83,7 +85,7 @@ export function TerminalProvider({
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(
     customer || null,
   );
-  const [paymentMethod, setPaymentMethod] = useState("ZAAD");
+  const [paymentMethod, setPaymentMethod] = useState(DEFAULT_PAYMENT_METHOD);
   const [amountPaid, setAmountPaid] = useState("");
   const [repaymentDate, setRepaymentDate] = useState<Date | undefined>(
     undefined,
@@ -167,8 +169,11 @@ export function TerminalProvider({
   const clearCart = useCallback(() => {
     setCartItems([]);
     setSelectedCustomer(null);
-    setPaymentMethod("cash");
+    // Must be one of the dropdown's values; the old lowercase "cash" matched
+    // nothing and made the next sale fail.
+    setPaymentMethod(DEFAULT_PAYMENT_METHOD);
     setAmountPaid("");
+    setRepaymentDate(undefined);
   }, []);
 
   const cartTotal = useMemo(() => {

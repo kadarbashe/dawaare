@@ -134,6 +134,8 @@ export default function SummarySidebar() {
             <input
               name="amount_paid"
               step="0.01"
+              min={0}
+              max={grandTotal}
               value={amountPaid}
               onChange={(e: ChangeEvent<HTMLInputElement>) =>
                 setAmountPaid(e.target.value)
@@ -179,6 +181,7 @@ export default function SummarySidebar() {
                   mode="single"
                   selected={repaymentDate}
                   onSelect={setRepaymentDate}
+                  disabled={{ before: new Date() }}
                 />
               </PopoverContent>
             </Popover>

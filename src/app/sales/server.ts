@@ -5,6 +5,8 @@ import { PAGE_SIZE } from "./constants";
 import { format_sale_row } from "@/utils/helpers";
 import { requireAdmin, AuthError } from "@/lib/auth-guard";
 import { range_from_day_strings } from "@/lib/dates";
+import { RuleError } from "@/lib/sale-rules";
+import { return_stock } from "@/lib/stock";
 
 export type SaleRow = {
   id: string;
@@ -137,36 +139,30 @@ export async function delete_sale(
   try {
     await requireAdmin();
 
-    const repaymentsCount = await prisma.repayment.count({
-      where: { sale_id },
-    });
-
-    if (repaymentsCount > 0) {
-      return {
-        success: false,
-        error: "Cannot delete sale with expected repayment tracking.",
-      };
-    }
-
-    const sale = await prisma.sale.findUnique({
-      where: { id: sale_id },
-      include: { sale_items: true },
-    });
-
-    if (!sale) {
-      return { success: false, error: "Sale not found." };
-    }
-
     await prisma.$transaction(async (tx) => {
-      for (const item of sale.sale_items) {
-        await tx.product.update({
-          where: { id: item.product_id },
-          data: {
-            stock_qty: {
-              increment: item.quantity,
-            },
-          },
-        });
+      // Lock the sale first. Recording a repayment updates this same row, so
+      // a payment can't land between the check below and the delete.
+      const locked = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM "sales" WHERE id = ${sale_id} FOR UPDATE`;
+      if (locked.length === 0) {
+        throw new RuleError("Sale not found.");
+      }
+
+      const repaymentsCount = await tx.repayment.count({
+        where: { sale_id },
+      });
+      if (repaymentsCount > 0) {
+        throw new RuleError(
+          "Cannot delete sale with expected repayment tracking.",
+        );
+      }
+
+      const items = await tx.saleItem.findMany({
+        where: { sale_id },
+        select: { product_id: true, quantity: true },
+      });
+      for (const item of items) {
+        await return_stock(tx, item.product_id, item.quantity);
       }
 
       await tx.sale.delete({
@@ -177,16 +173,10 @@ export async function delete_sale(
     revalidatePath("/sales");
     return { success: true };
   } catch (error: unknown) {
-    if (error instanceof AuthError) {
+    if (error instanceof AuthError || error instanceof RuleError) {
       return { success: false, error: error.message };
     }
-    if (error instanceof Error) {
-      console.error("Failed to delete sale:", error.message);
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
+    console.error("Failed to delete sale:", error);
     return {
       success: false,
       error: "An unexpected error occurred while deleting the sale.",

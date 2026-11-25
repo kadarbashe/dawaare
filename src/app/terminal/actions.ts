@@ -3,6 +3,14 @@
 import { prisma } from "@/lib/db";
 import { revalidatePath } from "next/cache";
 import { requireSession, AuthError } from "@/lib/auth-guard";
+import {
+  is_payment_method,
+  parse_cart,
+  round_money,
+  RuleError,
+  settle_payment,
+} from "@/lib/sale-rules";
+import { take_stock } from "@/lib/stock";
 
 export type ActionState = {
   success?: boolean;
@@ -17,93 +25,101 @@ export async function submitSale(
     const session = await requireSession();
     const sellerId = session.user.id;
 
-    const rawCart = formData.get("cart_payload") as string;
-    const notes = formData.get("notes") as string;
-    const paymentMethod =
-      (formData.get("payment_method") as "ZAAD" | "CASH" | "E_DAHAB") ||
-      "CASH";
-    const customerId = formData.get("customer_id") as string;
-    const amountPaidInput = formData.get("amount_paid") as string;
-    const repaymentDate = formData.get("repayment_date") as string;
+    const lines = parse_cart(formData.get("cart_payload") as string | null);
 
-    if (!rawCart) {
-      return { error: "Cart is empty." };
-    }
-    if (customerId && !repaymentDate) {
-      return { error: "Repayment date is required." };
+    const paymentMethod = formData.get("payment_method") || "CASH";
+    if (!is_payment_method(paymentMethod)) {
+      return { error: "Choose a payment method." };
     }
 
-    const cartItems = JSON.parse(rawCart);
-    if (!Array.isArray(cartItems) || cartItems.length === 0) {
-      return { error: "Invalid cart payload." };
-    }
+    const rawCustomerId = formData.get("customer_id");
+    const customerId =
+      typeof rawCustomerId === "string" && rawCustomerId !== ""
+        ? rawCustomerId
+        : null;
 
-    // Recalculate server-side to prevent tampering
-    let cartTotal = 0;
-    for (const item of cartItems) {
-      cartTotal += item.quantity * item.product.price;
-    }
+    const rawNotes = formData.get("notes");
+    const notes =
+      typeof rawNotes === "string" && rawNotes.trim() !== "" ? rawNotes : null;
 
-    const grandTotal = cartTotal;
+    // The cashier may adjust prices at the till, so the price comes from the
+    // cart; the cost floor below is checked against the database.
+    const grandTotal = round_money(
+      lines.reduce((sum, line) => sum + line.quantity * line.unit_price, 0),
+    );
 
-    const parsedAmountPaid = amountPaidInput
-      ? parseFloat(amountPaidInput)
-      : grandTotal;
-    const remaining = grandTotal - parsedAmountPaid;
-    const status =
-      remaining === grandTotal
-        ? "unpaid"
-        : remaining > 0.01
-          ? "partial"
-          : "paid";
-    // Process all operations in a database transaction
-    await prisma.$transaction(async (tx) => {
-      const sale = await tx.sale.create({
-        data: {
-          seller_id: sellerId,
-          customer_id: customerId && customerId.length > 0 ? customerId : null,
-          total_amount: grandTotal,
-          amount_paid: parsedAmountPaid,
-          remaining: remaining > 0 ? remaining : 0,
-          status: status,
-          payment_method: paymentMethod || "ZAAD",
-          notes: notes,
-          repayment_date: new Date(repaymentDate),
-        },
-      });
+    const settlement = settle_payment({
+      total: grandTotal,
+      amount_paid_input: formData.get("amount_paid") as string | null,
+      has_customer: customerId !== null,
+      repayment_date_input: formData.get("repayment_date") as string | null,
+    });
 
-      for (const item of cartItems) {
-        const product = await tx.product.findUnique({
-          where: { id: item.product.id },
-          select: { stock_qty: true, cost_price: true },
-        });
-
-        if (!product || product.stock_qty < item.quantity) {
-          throw new Error(
-            `Not enough stock for "${item.product.name}". Please refresh and try again.`,
-          );
+    await prisma.$transaction(
+      async (tx) => {
+        if (customerId) {
+          const customer = await tx.customer.findUnique({
+            where: { id: customerId },
+            select: { id: true },
+          });
+          if (!customer) throw new RuleError("Customer not found.");
         }
 
-        await tx.saleItem.create({
+        const products = await tx.product.findMany({
+          where: { id: { in: lines.map((line) => line.product_id) } },
+          select: { id: true, name: true, cost_price: true },
+        });
+        const productsById = new Map(products.map((p) => [p.id, p]));
+
+        for (const line of lines) {
+          const product = productsById.get(line.product_id);
+          if (!product) {
+            throw new RuleError(
+              "A product in the cart no longer exists. Refresh and try again.",
+            );
+          }
+          if (line.unit_price < round_money(product.cost_price)) {
+            throw new RuleError(
+              `"${product.name}" can't be sold below its cost price ($${product.cost_price.toFixed(2)}).`,
+            );
+          }
+        }
+
+        const sale = await tx.sale.create({
           data: {
-            sale_id: sale.id,
-            product_id: item.product.id,
-            product_name: item.product.name,
-            quantity: item.quantity,
-            unit_price: item.product.price,
-            total_price: item.quantity * item.product.price,
-            cost_price: product.cost_price,
+            seller_id: sellerId,
+            customer_id: customerId,
+            total_amount: grandTotal,
+            amount_paid: settlement.amount_paid,
+            remaining: settlement.remaining,
+            status: settlement.status,
+            payment_method: paymentMethod,
+            notes,
+            repayment_date: settlement.repayment_date,
           },
         });
 
-        await tx.product.update({
-          where: { id: item.product.id },
-          data: {
-            stock_qty: { decrement: item.quantity },
-          },
-        });
-      }
-    });
+        for (const line of lines) {
+          const product = productsById.get(line.product_id)!;
+
+          await take_stock(tx, product.id, product.name, line.quantity);
+
+          await tx.saleItem.create({
+            data: {
+              sale_id: sale.id,
+              product_id: product.id,
+              product_name: product.name,
+              quantity: line.quantity,
+              unit_price: line.unit_price,
+              total_price: round_money(line.quantity * line.unit_price),
+              cost_price: product.cost_price,
+            },
+          });
+        }
+      },
+      // Each cart line is a few round trips; leave room for large carts.
+      { timeout: 15000 },
+    );
 
     // Revalidate paths that show stock and sales
     revalidatePath("/terminal");
@@ -112,13 +128,10 @@ export async function submitSale(
 
     return { success: true };
   } catch (error: unknown) {
-    if (error instanceof AuthError) {
+    if (error instanceof AuthError || error instanceof RuleError) {
       return { error: error.message };
     }
     console.error("Checkout failed:", error);
-    const err = error as Error;
-    return {
-      error: err?.message || "An error occurred while finishing the sale.",
-    };
+    return { error: "An error occurred while finishing the sale." };
   }
 }
