@@ -1,15 +1,24 @@
 "use server";
 
 import { prisma } from "@/lib/db";
-import { deleteImage } from "@/lib/upload";
 import { revalidatePath } from "next/cache";
 import { requireSession, AuthError } from "@/lib/auth-guard";
 import type { Prisma } from "@prisma/client";
+import {
+  is_low_stock_qty,
+  parse_product_numbers,
+  RuleError,
+} from "@/lib/sale-rules";
 
 interface ActionResult {
   status: string;
   message: string;
 }
+
+// Uploaded images are not deleted here when saving fails. The product modals
+// keep the upload so the form can be resubmitted, and delete it themselves
+// if it is closed unsaved. Deleting here used to remove a product's live
+// image whenever an edit failed.
 
 export async function createProduct(
   _prev: ActionResult | null,
@@ -18,26 +27,20 @@ export async function createProduct(
   const name = formData.get("name") as string;
   const sku = formData.get("sku") as string;
   const category = formData.get("category") as string;
-  const catId = formData.get("catId") as string;
-  const price = parseFloat(formData.get("price") as string);
-  const cost_price = parseFloat(formData.get("cost_price") as string);
-  const stock_qty = parseInt(formData.get("stock_qty") as string);
   const image = formData.get("image") as string;
   const public_id = formData.get("public_id") as string;
 
-  if (
-    !name ||
-    !sku ||
-    !category ||
-    isNaN(price) ||
-    isNaN(cost_price) ||
-    isNaN(stock_qty) ||
-    !image
-  ) {
+  if (!name || !sku || !category || !image) {
     return { status: "error", message: "Please fill in all required fields." };
   }
 
   try {
+    const { price, cost_price, stock_qty } = parse_product_numbers(
+      formData.get("price"),
+      formData.get("cost_price"),
+      formData.get("stock_qty"),
+    );
+
     await requireSession();
 
     const existingProduct = await prisma.product.findUnique({
@@ -51,6 +54,13 @@ export async function createProduct(
       };
     }
 
+    const categoryRow = await prisma.itemsCategory.findUnique({
+      where: { name: category },
+    });
+    if (!categoryRow) {
+      return { status: "error", message: "Choose a valid category." };
+    }
+
     await prisma.$transaction([
       prisma.product.create({
         data: {
@@ -60,38 +70,24 @@ export async function createProduct(
           price,
           cost_price,
           stock_qty,
-          is_low_stock: stock_qty <= 5,
+          is_low_stock: is_low_stock_qty(stock_qty),
           image,
           public_id,
         },
       }),
       prisma.itemsCategory.update({
-        where: {
-          id: catId,
-        },
-        data: {
-          count: {
-            increment: 1,
-          },
-        },
+        where: { id: categoryRow.id },
+        data: { count: { increment: 1 } },
       }),
     ]);
 
     revalidatePath("/inventory");
     return { status: "success", message: "Product created successfully" };
   } catch (error) {
-    if (error instanceof AuthError) {
+    if (error instanceof AuthError || error instanceof RuleError) {
       return { status: "error", message: error.message };
     }
     console.error("Failed to create product:", error);
-
-    if (public_id) {
-      try {
-        await deleteImage(public_id);
-      } catch (deleteError) {
-        console.error("Failed to delete orphaned image:", deleteError);
-      }
-    }
 
     return {
       status: "error",
@@ -108,80 +104,78 @@ export async function updateProduct(
   const name = formData.get("name") as string;
   const sku = formData.get("sku") as string;
   const category = formData.get("category") as string;
-  const newCatId = formData.get("catId") as string;
-  const oldCatName = formData.get("oldCat") as string;
-  const price = parseFloat(formData.get("price") as string);
-  const cost_price = parseFloat(formData.get("cost_price") as string);
-  const stock_qty = parseInt(formData.get("stock_qty") as string);
   const image = formData.get("image") as string;
   const public_id = formData.get("public_id") as string;
 
-  const productData = {
-    name,
-    sku,
-    category,
-    price,
-    cost_price,
-    stock_qty,
-    is_low_stock: stock_qty <= 5,
-    image,
-    public_id,
-  };
-
-  if (
-    !id ||
-    !name ||
-    !sku ||
-    !category ||
-    isNaN(price) ||
-    isNaN(cost_price) ||
-    isNaN(stock_qty) ||
-    !image
-  ) {
+  if (!id || !name || !sku || !category || !image) {
     return { status: "error", message: "Please fill in all required fields." };
   }
 
   try {
+    const { price, cost_price, stock_qty } = parse_product_numbers(
+      formData.get("price"),
+      formData.get("cost_price"),
+      formData.get("stock_qty"),
+    );
+
     await requireSession();
 
-    const oldcat = await prisma.itemsCategory.findUnique({
-      where: {
-        name: oldCatName,
-      },
+    const existing = await prisma.product.findUnique({
+      where: { id },
+      select: { sku: true, category: true },
     });
-    const oldCatId = oldcat?.id;
+    if (!existing) {
+      return { status: "error", message: "Product not found." };
+    }
+
+    if (sku !== existing.sku) {
+      const skuTaken = await prisma.product.findUnique({
+        where: { sku },
+        select: { id: true },
+      });
+      if (skuTaken) {
+        return {
+          status: "error",
+          message: "Another product already uses this SKU.",
+        };
+      }
+    }
 
     const updates: Prisma.PrismaPromise<unknown>[] = [
-      prisma.product.update({ where: { id }, data: productData }),
+      prisma.product.update({
+        where: { id },
+        data: {
+          name,
+          sku,
+          category,
+          price,
+          cost_price,
+          stock_qty,
+          is_low_stock: is_low_stock_qty(stock_qty),
+          image,
+          public_id,
+        },
+      }),
     ];
 
-    if (newCatId !== "") {
-      // update category count
-      if (oldcat && newCatId !== oldCatId) {
-        updates.push(
-          prisma.itemsCategory.update({
-            where: {
-              id: oldCatId,
-            },
-            data: {
-              count: {
-                decrement: 1,
-              },
-            },
-          }),
-        );
+    // Category counts move only when the category actually changes, judged
+    // against what is stored rather than what the form claims.
+    if (category !== existing.category) {
+      const newCategory = await prisma.itemsCategory.findUnique({
+        where: { name: category },
+      });
+      if (!newCategory) {
+        return { status: "error", message: "Choose a valid category." };
       }
 
       updates.push(
+        prisma.itemsCategory.updateMany({
+          where: { name: existing.category, count: { gt: 0 } },
+          data: { count: { decrement: 1 } },
+        }),
         prisma.itemsCategory.update({
-          where: {
-            id: newCatId,
-          },
-          data: {
-            count: {
-              increment: 1,
-            },
-          },
+          where: { id: newCategory.id },
+          data: { count: { increment: 1 } },
         }),
       );
     }
@@ -191,18 +185,10 @@ export async function updateProduct(
     revalidatePath("/inventory");
     return { status: "success", message: "Product updated successfully" };
   } catch (error) {
-    if (error instanceof AuthError) {
+    if (error instanceof AuthError || error instanceof RuleError) {
       return { status: "error", message: error.message };
     }
     console.error("Failed to update product:", error);
-
-    if (public_id) {
-      try {
-        await deleteImage(public_id);
-      } catch (deleteError) {
-        console.error("Failed to delete orphaned image:", deleteError);
-      }
-    }
 
     return {
       status: "error",

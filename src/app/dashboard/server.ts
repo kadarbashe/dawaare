@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/db";
 import { RecentTransactionsWithCustomerName } from "@/utils/types";
 import { resolve_range, shop_now, shop_day_key } from "@/lib/dates";
+import { LOW_STOCK_THRESHOLD } from "@/lib/sale-rules";
 
 export type DashboardStats = {
   total_sales: number;
@@ -67,7 +68,7 @@ export async function get_dashboard_stats(
         _sum: { remaining: true },
       }),
       prisma.product.count({
-        where: { is_low_stock: true },
+        where: { stock_qty: { lte: LOW_STOCK_THRESHOLD } },
       }),
       prisma.saleItem.findMany({
         where: {

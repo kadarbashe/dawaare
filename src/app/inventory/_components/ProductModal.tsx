@@ -367,6 +367,7 @@ export default function ProductModal({
                 className="w-full bg-white dark:bg-primary/5 border border-slate-300 dark:border-primary/20 rounded-md pl-8 pr-4 py-2.5 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                 placeholder="0.00"
                 step="0.01"
+                min={0}
                 type="number"
               />
             </div>
@@ -390,6 +391,7 @@ export default function ProductModal({
                 className="w-full bg-white dark:bg-primary/5 border border-slate-300 dark:border-primary/20 rounded-md pl-8 pr-4 py-2.5 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                 placeholder="0.00"
                 step="0.01"
+                min={0}
                 type="number"
               />
             </div>
@@ -412,6 +414,7 @@ export default function ProductModal({
                 name="stock_qty"
                 className="w-full bg-white dark:bg-primary/5 border border-slate-300 dark:border-primary/20 rounded-md pl-10 pr-4 py-2.5 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                 placeholder="0"
+                min={0}
                 type="number"
               />
             </div>

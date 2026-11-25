@@ -4,6 +4,7 @@ import Link from "next/link";
 import { BarChart3 } from "lucide-react";
 import EditProductBtn from "./EditProduct";
 import { ItemsCategory } from "@prisma/client";
+import { is_low_stock_qty } from "@/lib/sale-rules";
 
 export default function ProductList({
   products,
@@ -77,7 +78,7 @@ export default function ProductList({
               {product.cost_price}
             </td>
             <td className="px-6 py-4">
-              {product.is_low_stock ? (
+              {is_low_stock_qty(product.stock_qty) ? (
                 <span className="text-primary font-black text-sm flex items-center gap-1">
                   {product.stock_qty}{" "}
                   <span className="text-[10px] font-bold uppercase tracking-widest">

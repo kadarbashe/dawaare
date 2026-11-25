@@ -77,12 +77,31 @@ export async function edit_category(
       return { status: "error", message: "Category not found" };
     }
 
-    await prisma.itemsCategory.update({
-      where: { id },
-      data: { name },
+    if (existingCategory.name === name) {
+      return { status: "success", message: "Category updated successfully!" };
+    }
+
+    const nameTaken = await prisma.itemsCategory.findUnique({
+      where: { name },
     });
+    if (nameTaken) {
+      return { status: "error", message: "Category already exists" };
+    }
+
+    // Products store the category by name, so they have to move with it.
+    await prisma.$transaction([
+      prisma.itemsCategory.update({
+        where: { id },
+        data: { name },
+      }),
+      prisma.product.updateMany({
+        where: { category: existingCategory.name },
+        data: { category: name },
+      }),
+    ]);
 
     revalidatePath("/settings");
+    revalidatePath("/inventory");
     return { status: "success", message: "Category updated successfully!" };
   } catch (error: unknown) {
     if (error instanceof AuthError) {
@@ -110,6 +129,17 @@ export async function deleteCategory(id: string): Promise<ActionState> {
 
     if (!existingCategory) {
       return { status: "error", message: "Category not found" };
+    }
+
+    // Counted from the products themselves; the stored count can drift.
+    const productCount = await prisma.product.count({
+      where: { category: existingCategory.name },
+    });
+    if (productCount > 0) {
+      return {
+        status: "error",
+        message: `${productCount} ${productCount === 1 ? "product still uses" : "products still use"} this category. Move them to another category first.`,
+      };
     }
 
     await prisma.itemsCategory.delete({

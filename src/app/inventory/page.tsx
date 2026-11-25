@@ -5,6 +5,7 @@ import Topbar from "../../components/Topbar";
 import ButtomAcionBar from "../terminal/_components/ButtomAcionBar";
 import InventoryClient from "./_components/InventoryClient";
 import { ItemsCategory, Product } from "@/utils/types";
+import { is_low_stock_qty, LOW_STOCK_THRESHOLD } from "@/lib/sale-rules";
 
 const PAGE_SIZE = 15;
 export type Filter =
@@ -38,7 +39,7 @@ export default async function InventoryPage({
   const products: Product[] = data;
 
   const lowStockProducts = products.filter(
-    (product: Product) => product.is_low_stock,
+    (product: Product) => is_low_stock_qty(product.stock_qty),
   ).length;
 
   const outOfStockProducts = products.filter(
@@ -96,7 +97,7 @@ export default async function InventoryPage({
     filter === "out of stock"
       ? { stock_qty: 0 }
       : filter === "low stock"
-        ? { is_low_stock: true }
+        ? { stock_qty: { lte: LOW_STOCK_THRESHOLD } }
         : {};
 
   const listOrderBy: Prisma.ProductOrderByWithRelationInput =

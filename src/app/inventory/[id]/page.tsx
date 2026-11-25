@@ -2,6 +2,7 @@ import Topbar from "@/components/Topbar";
 import { prisma } from "@/lib/db";
 import { SaleItem, SaleItemWithSaleAndCustomer } from "@/utils/types";
 import { shop_now, to_shop_time, shop_day_key } from "@/lib/dates";
+import { is_low_stock_qty } from "@/lib/sale-rules";
 import {
   AlertTriangle,
   ArrowDownLeft,
@@ -175,7 +176,7 @@ export default async function ProductDetailPage({
                 </div>
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
-                    {product.is_low_stock ? (
+                    {is_low_stock_qty(product.stock_qty) ? (
                       <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/20 text-primary">
                         Low Stock
                       </span>
@@ -309,7 +310,7 @@ export default async function ProductDetailPage({
                   <h3 className="text-2xl font-black text-slate-900 dark:text-slate-100">
                     {product.stock_qty} units
                   </h3>
-                  {product.is_low_stock && (
+                  {is_low_stock_qty(product.stock_qty) && (
                     <span className="text-primary text-sm font-bold flex items-center gap-1">
                       <AlertTriangle size={12} />
                       Low
